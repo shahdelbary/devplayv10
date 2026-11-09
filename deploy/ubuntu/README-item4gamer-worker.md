@@ -72,6 +72,8 @@ Do not change this into a call to index.mjs for the test order. The daemon dispa
 - Delivered codes are stored in supplier_response.delivered_codes.
 - Refunds use the existing auto_refund_product_order_after_supplier_rejection RPC. It locks the order and checks the wallet transaction reference, so the refund is applied at most once.
 - maintenance_mode or supplier_dispatch_enabled=false pauses new dispatch. Status polling and confirmed-refund reconciliation continue so existing orders remain trackable.
+- Polling is adaptive to stay inside the Supabase egress quota. The worker polls every WORKER_POLL_INTERVAL_MS while there is work, backs off to WORKER_IDLE_POLL_INTERVAL_MS (default 30s) when idle, and to WORKER_ERROR_POLL_INTERVAL_MS (default 5 min) while cycles keep failing. A new order can therefore wait up to the idle interval before dispatch.
+- Refund reconciliation runs immediately after a job fails or is refunded, and otherwise every WORKER_REFUND_RECONCILE_INTERVAL_MS (default 10 min).
 ## Catalog synchronization through the static IP
 
 Apply `docs/item4gamer_catalog_sync_worker.sql` in Supabase, then deploy this updated worker and restart it:

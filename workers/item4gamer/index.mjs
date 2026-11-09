@@ -18,6 +18,20 @@ const config = {
   pollIntervalMs: Math.max(2_000, Number(process.env.WORKER_POLL_INTERVAL_MS ?? 5_000)),
   dispatchBatchSize: Math.min(50, Math.max(1, Number(process.env.WORKER_DISPATCH_BATCH_SIZE ?? 10))),
   syncBatchSize: Math.min(200, Math.max(1, Number(process.env.WORKER_SYNC_BATCH_SIZE ?? 100))),
+  // Longest wait between cycles while nothing is happening.
+  idlePollIntervalMs: Math.max(5_000, Number(process.env.WORKER_IDLE_POLL_INTERVAL_MS ?? 30_000)),
+  // Longest wait between cycles while Supabase or the network keeps failing.
+  errorPollIntervalMs: Math.max(30_000, Number(process.env.WORKER_ERROR_POLL_INTERVAL_MS ?? 300_000)),
+  // Safety-net cadence for refund reconciliation; it also runs right after any job fails.
+  refundReconcileIntervalMs: Math.max(60_000, Number(process.env.WORKER_REFUND_RECONCILE_INTERVAL_MS ?? 600_000)),
+};
+
+// A supplier-pending job that changed this recently keeps the worker polling faster.
+const FRESH_PENDING_WINDOW_MS = 10 * 60_000;
+
+const state = {
+  refundCheckDue: true,
+  lastRefundCheckAt: 0,
 };
 
 const db = createClient(config.supabaseUrl, config.supabaseServiceRoleKey, {
@@ -200,7 +214,22 @@ async function claimJobs() {
   return data ?? [];
 }
 
+// Body-less count of jobs the claim RPC could pick up, so an idle cycle costs
+// one tiny request instead of a settings read plus a claim.
+async function hasDispatchCandidates() {
+  const { count, error } = await db
+    .from("product_supplier_jobs")
+    .select("id", { count: "exact", head: true })
+    .eq("provider_code", "item4gamer")
+    .in("status", ["pending", "sending"])
+    .eq("delivery_state", "not_sent")
+    .is("supplier_order_id", null);
+  if (error) throw error;
+  return (count ?? 0) > 0;
+}
+
 async function dispatch() {
+  if (!(await hasDispatchCandidates())) return 0;
   if (!(await platformAllowsDispatch())) {
     log("dispatch_paused_by_platform_settings");
     return 0;
@@ -245,6 +274,7 @@ async function dispatch() {
           updated_at: new Date().toISOString(),
         }).eq("id", job.id).eq("delivery_state", "dispatching");
         if (updateError) throw updateError;
+        state.refundCheckDue = true;
         await refreshOrder(job);
         log("job_rejected", { jobId: job.id, status: providerError.status });
       } else {
@@ -265,20 +295,28 @@ async function dispatch() {
 
 async function syncStatuses() {
   const { data: jobs, error } = await db.from("product_supplier_jobs")
-    .select("id,order_id,order_item_id,supplier_order_id")
+    .select("id,order_id,order_item_id,supplier_order_id,supplier_status,updated_at")
     .eq("provider_code", "item4gamer")
     .eq("status", "supplier_pending")
     .not("supplier_order_id", "is", null)
     .order("updated_at", { ascending: true })
     .limit(config.syncBatchSize);
   if (error) throw error;
+  const rows = jobs ?? [];
+  // A full batch relies on updated_at being touched to rotate through the
+  // backlog, so only skip unchanged jobs when everything fits in one batch.
+  const skipUnchanged = rows.length < config.syncBatchSize;
+  const freshSince = Date.now() - FRESH_PENDING_WINDOW_MS;
+  const hasFreshPending = rows.some((row) => Date.parse(row.updated_at) > freshSince);
   let processed = 0;
-  for (const job of jobs ?? []) {
+  for (const job of rows) {
     try {
       const response = await providerRequest(`order/get-order?order_id=${encodeURIComponent(job.supplier_order_id)}`);
       if (!response.order) continue;
       const supplierStatus = normalizedStatus(response.order.status);
       const status = localStatus(supplierStatus);
+      // Still pending with the same supplier status: nothing to write.
+      if (skipUnchanged && status === "supplier_pending" && supplierStatus === normalizedStatus(job.supplier_status)) continue;
       const deliveredCodes = extractCodes(response.order);
       const { error: updateError } = await db.from("product_supplier_jobs").update({
         status,
@@ -289,6 +327,7 @@ async function syncStatuses() {
         updated_at: new Date().toISOString(),
       }).eq("id", job.id).eq("supplier_order_id", job.supplier_order_id);
       if (updateError) throw updateError;
+      if (status === "failed" || status === "refunded") state.refundCheckDue = true;
       await refreshOrder(job);
       processed += 1;
       log("job_status_synced", { jobId: job.id, supplierStatus, deliveredCodes: deliveredCodes.length });
@@ -296,24 +335,39 @@ async function syncStatuses() {
       log("status_sync_failed", { jobId: job.id, message: error instanceof Error ? error.message : "unknown" });
     }
   }
-  return processed;
+  return { processed, hasFreshPending };
+}
+
+// Runs right after a job fails or is refunded, and otherwise only every
+// refundReconcileIntervalMs as a safety net. A failed run stays due and retries.
+async function reconcileRefundsIfDue() {
+  const due = state.refundCheckDue || Date.now() - state.lastRefundCheckAt >= config.refundReconcileIntervalMs;
+  if (!due) return 0;
+  const refunded = await reconcileRefunds();
+  state.refundCheckDue = false;
+  state.lastRefundCheckAt = Date.now();
+  return refunded;
 }
 
 async function reconcileRefunds() {
+  // Newest first, so recent failures are never starved by an old backlog.
   const { data, error } = await db.from("product_supplier_jobs")
     .select("order_id,supplier_order_id,supplier_status,status")
     .eq("provider_code", "item4gamer")
     .in("status", ["failed", "refunded"])
-    .order("updated_at", { ascending: true })
+    .order("updated_at", { ascending: false })
     .limit(config.syncBatchSize);
   if (error) throw error;
   const orderIds = [...new Set((data ?? []).map((row) => row.order_id))];
+  if (orderIds.length === 0) return 0;
+  const { data: orders, error: ordersError } = await db.from("product_orders")
+    .select("id,status").in("id", orderIds);
+  if (ordersError) throw ordersError;
+  const orderStatusById = new Map((orders ?? []).map((row) => [row.id, row.status]));
   let refunded = 0;
   for (const orderId of orderIds) {
-    const { data: order, error: orderError } = await db.from("product_orders")
-      .select("status").eq("id", orderId).maybeSingle();
-    if (orderError) throw orderError;
-    if (!order || order.status === "refunded" || order.status === "completed") continue;
+    const orderStatus = orderStatusById.get(orderId);
+    if (!orderStatus || orderStatus === "refunded" || orderStatus === "completed") continue;
     const evidence = (data ?? []).filter((row) => row.order_id === orderId);
     const { error: refundError } = await db.rpc("auto_refund_product_order_after_supplier_rejection", {
       p_order_id: orderId,
@@ -410,20 +464,35 @@ async function processCatalogSyncJobs() {
 async function cycle() {
   const catalogSynced = await processCatalogSyncJobs();
   const dispatched = await dispatch();
-  const synced = await syncStatuses();
-  const refunded = await reconcileRefunds();
-  if (catalogSynced || dispatched || synced || refunded) log("cycle_complete", { catalogSynced, dispatched, synced, refunded });
+  const { processed: synced, hasFreshPending } = await syncStatuses();
+  const refunded = await reconcileRefundsIfDue();
+  const worked = Boolean(catalogSynced || dispatched || synced || refunded);
+  if (worked) log("cycle_complete", { catalogSynced, dispatched, synced, refunded });
+  return { worked, hasFreshPending };
 }
 
 async function main() {
-  log("worker_started", { pollIntervalMs: config.pollIntervalMs });
+  log("worker_started", {
+    pollIntervalMs: config.pollIntervalMs,
+    idlePollIntervalMs: config.idlePollIntervalMs,
+    refundReconcileIntervalMs: config.refundReconcileIntervalMs,
+  });
+  // Poll fast while there is work, then back off: up to 3x the base interval
+  // while a recently changed order is still pending at the supplier, up to
+  // idlePollIntervalMs when nothing is happening, and up to
+  // errorPollIntervalMs while cycles keep failing (e.g. Supabase returns 402).
+  const pendingCap = Math.min(config.idlePollIntervalMs, config.pollIntervalMs * 3);
+  let delay = config.pollIntervalMs;
   while (!stopping) {
     try {
-      await cycle();
+      const { worked, hasFreshPending } = await cycle();
+      if (worked) delay = config.pollIntervalMs;
+      else delay = Math.min(hasFreshPending ? pendingCap : config.idlePollIntervalMs, Math.round(delay * 1.5));
     } catch (error) {
-      log("cycle_failed", { message: error instanceof Error ? error.message : "unknown" });
+      delay = Math.min(config.errorPollIntervalMs, Math.max(config.pollIntervalMs, delay) * 2);
+      log("cycle_failed", { message: error instanceof Error ? error.message : "unknown", retryInMs: delay });
     }
-    if (!stopping) await new Promise((resolve) => setTimeout(resolve, config.pollIntervalMs));
+    if (!stopping) await new Promise((resolve) => setTimeout(resolve, delay));
   }
   log("worker_stopped");
 }
