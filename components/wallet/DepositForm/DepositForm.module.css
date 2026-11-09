@@ -587,3 +587,9 @@
   }
 }
 .nonRefundable{display:flex;align-items:flex-start;gap:9px;padding:13px;border:1px solid color-mix(in srgb,var(--danger) 45%,var(--border));border-radius:13px;background:color-mix(in srgb,var(--danger) 8%,var(--surface));color:var(--danger)}.nonRefundable svg{flex:none}.nonRefundable p{margin:0;color:var(--muted);font-size:9px;line-height:1.8}.nonRefundable strong{display:block;margin-bottom:2px;color:var(--danger)}
+
+.instapayPanel{display:grid;grid-template-columns:minmax(130px,.7fr) minmax(0,1.3fr);gap:12px;padding:12px;border:1px solid color-mix(in srgb,var(--primary) 40%,var(--border));border-radius:16px;background:linear-gradient(135deg,var(--primary-soft),var(--surface-soft))}
+.instapayQr{display:grid;overflow:hidden;place-items:center;border-radius:13px;background:#fff}.instapayQr img{width:100%;height:auto;object-fit:contain}
+.instapayOptions{display:grid;align-content:center;gap:9px}.instapayOptions>a{display:flex;min-height:43px;align-items:center;justify-content:center;gap:7px;padding-inline:12px;border-radius:11px;background:var(--primary);color:#fff;font-size:9px;font-weight:900}
+.instapayOptions>div{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px;border:1px solid var(--border);border-radius:11px;background:var(--surface)}.instapayOptions>div>span{display:grid;min-width:0;gap:3px}.instapayOptions small,.fieldHint{color:var(--muted);font-size:7px;line-height:1.6}.instapayOptions strong{font-size:10px}.instapayOptions button{display:inline-flex;flex:0 0 auto;min-height:34px;align-items:center;gap:5px;padding-inline:8px;border:1px solid var(--primary-border);border-radius:9px;background:var(--primary-soft);color:var(--primary);font-size:8px;font-weight:900}.instapayOptions p{margin:0;color:var(--muted);font-size:8px;line-height:1.7}
+@media(max-width:520px){.instapayPanel{grid-template-columns:1fr}.instapayQr{width:min(100%,270px);margin-inline:auto}}

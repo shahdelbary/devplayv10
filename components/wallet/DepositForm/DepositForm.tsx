@@ -6,11 +6,14 @@ import {
   Check,
   CheckCircle2,
   Copy,
+  ExternalLink,
   FileImage,
   LoaderCircle,
+  QrCode,
   UploadCloud,
   WalletCards,
 } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import {
   useMemo,
@@ -48,6 +51,9 @@ interface FormMessage {
 }
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const INSTAPAY_METHOD_ID = "instapay-egypt";
+const INSTAPAY_DIRECT_URL = "https://ipn.eg/S/shahdelbary/instapay/5y8tBa";
+const INSTAPAY_PHONE = "01035966569";
 
 const ACCEPTED_FILE_TYPES = [
   "image/jpeg",
@@ -64,6 +70,10 @@ function formatEgp(value: number): string {
 
 function formatUsd(value: number): string {
   return `$${value.toFixed(4)}`;
+}
+
+function isInstapayMethod(method: DepositPaymentMethod | undefined): boolean {
+  return method?.id === INSTAPAY_METHOD_ID || method?.network?.toLowerCase() === "instapay";
 }
 
 function calculateDeposit(
@@ -145,8 +155,8 @@ export function DepositForm({
   const [proofPreview, setProofPreview] =
     useState<string | null>(null);
 
-  const [copied, setCopied] =
-    useState(false);
+  const [copiedValue, setCopiedValue] =
+    useState<"address" | "phone" | null>(null);
 
   const [loading, setLoading] =
     useState(false);
@@ -199,20 +209,13 @@ export function DepositForm({
     setMessage(null);
   }
 
-  async function copyAddress(): Promise<void> {
-    if (!selectedMethod) {
-      return;
-    }
-
+  async function copyValue(value: string, target: "address" | "phone"): Promise<void> {
     try {
-      await navigator.clipboard.writeText(
-        selectedMethod.address,
-      );
-
-      setCopied(true);
+      await navigator.clipboard.writeText(value);
+      setCopiedValue(target);
 
       window.setTimeout(() => {
-        setCopied(false);
+        setCopiedValue((current) => current === target ? null : current);
       }, 1800);
     } catch {
       setMessage({
@@ -286,14 +289,20 @@ export function DepositForm({
       return `الحد الأدنى هو ${selectedMethod.minimum_amount} ${currency}.`;
     }
 
-    if (
-      selectedMethod.type ===
-        "egyptian_wallet" &&
-      !/^01[0125][0-9]{8}$/.test(
-        senderAccount.trim(),
-      )
-    ) {
-      return "اكتبي رقم المحفظة المحوّل منها بشكل صحيح.";
+    if (selectedMethod.type === "egyptian_wallet") {
+      const sender = senderAccount.trim();
+
+      if (isInstapayMethod(selectedMethod)) {
+        const validInstapaySender =
+          /^01[0125][0-9]{8}$/.test(sender) ||
+          /^[a-zA-Z0-9._-]+@instapay$/i.test(sender);
+
+        if (!validInstapaySender) {
+          return "اكتبي عنوان InstaPay أو رقم الهاتف المحوّل منه بشكل صحيح.";
+        }
+      } else if (!/^01[0125][0-9]{8}$/.test(sender)) {
+        return "اكتبي رقم المحفظة المحوّل منها بشكل صحيح.";
+      }
     }
 
     if (!proofFile) {
@@ -550,7 +559,7 @@ export function DepositForm({
         </div>
 
         <div className={styles.methodGroup}>
-          <strong>المحافظ المصرية</strong>
+          <strong>طرق الدفع المصرية</strong>
 
           <div className={styles.methodsGrid}>
             {egyptianMethods.map((method) => (
@@ -566,11 +575,11 @@ export function DepositForm({
                   selectMethod(method.id)
                 }
               >
-                <WalletCards size={19} />
+                {isInstapayMethod(method) ? <QrCode size={19} /> : <WalletCards size={19} />}
 
                 <span>
                   <strong>{method.name}</strong>
-                  <small>تحويل بالجنيه</small>
+                  <small>{isInstapayMethod(method) ? "QR أو رابط مباشر" : "تحويل بالجنيه"}</small>
                 </span>
 
                 {selectedMethodId ===
@@ -599,7 +608,7 @@ export function DepositForm({
                   selectMethod(method.id)
                 }
               >
-                <WalletCards size={19} />
+                {isInstapayMethod(method) ? <QrCode size={19} /> : <WalletCards size={19} />}
 
                 <span>
                   <strong>
@@ -639,36 +648,30 @@ export function DepositForm({
 
             <div className={styles.addressCard}>
               <div>
-                <span>
-                  {selectedMethod.type ===
-                  "crypto"
-                    ? `USDT — ${selectedMethod.network}`
-                    : selectedMethod.name}
-                </span>
-
-                <strong>
-                  {selectedMethod.address}
-                </strong>
+                <span>{selectedMethod.type === "crypto" ? `USDT — ${selectedMethod.network}` : selectedMethod.name}</span>
+                <strong>{selectedMethod.address}</strong>
               </div>
-
-              <button
-                type="button"
-                onClick={copyAddress}
-              >
-                {copied ? (
-                  <>
-                    <Check size={16} />
-                    تم النسخ
-                  </>
-                ) : (
-                  <>
-                    <Copy size={16} />
-                    نسخ
-                  </>
-                )}
+              <button type="button" onClick={() => void copyValue(selectedMethod.address, "address")}>
+                {copiedValue === "address" ? <><Check size={16} />تم النسخ</> : <><Copy size={16} />نسخ</>}
               </button>
             </div>
 
+            {isInstapayMethod(selectedMethod) && (
+              <div className={styles.instapayPanel}>
+                <div className={styles.instapayQr}><Image src="/payments/instapay-qr.jpg" alt="QR للتحويل إلى InstaPay DevPlay" width={530} height={709} priority /></div>
+                <div className={styles.instapayOptions}>
+                  <a href={INSTAPAY_DIRECT_URL} target="_blank" rel="noreferrer"><ExternalLink size={17} />فتح InstaPay والتحويل مباشرة</a>
+                  <div>
+                    <span><small>رقم InstaPay</small><strong dir="ltr">{INSTAPAY_PHONE}</strong></span>
+                    <button type="button" onClick={() => void copyValue(INSTAPAY_PHONE, "phone")}>
+                      {copiedValue === "phone" ? <Check size={15} /> : <Copy size={15} />}
+                      {copiedValue === "phone" ? "تم النسخ" : "نسخ الرقم"}
+                    </button>
+                  </div>
+                  <p>بعد إتمام التحويل، اكتبي حساب InstaPay الذي حوّلتِ منه وارفعي صورة الإثبات الواضحة.</p>
+                </div>
+              </div>
+            )}
             {selectedMethod.type ===
               "crypto" && (
               <div className={styles.networkWarning}>
@@ -816,48 +819,31 @@ export function DepositForm({
               </div>
             )}
 
-            {selectedMethod.type==="egyptian_wallet"&&<label className={styles.field}>
+            {selectedMethod.type === "egyptian_wallet" && <label className={styles.field}>
               <span>
-                {selectedMethod.type ===
-                "egyptian_wallet"
-                  ? "رقم المحفظة المحوّل منها"
-                  : "عنوان المحفظة المحوّل منها"}
+                {isInstapayMethod(selectedMethod)
+                  ? "حساب InstaPay المحوّل منه"
+                  : "رقم المحفظة المحوّل منها"}
               </span>
 
               <div>
                 <input
-                  type={
-                    selectedMethod.type ===
-                    "egyptian_wallet"
-                      ? "tel"
-                      : "text"
-                  }
+                  type={isInstapayMethod(selectedMethod) ? "text" : "tel"}
                   value={senderAccount}
-                  inputMode={
-                    selectedMethod.type ===
-                    "egyptian_wallet"
-                      ? "numeric"
-                      : undefined
-                  }
+                  inputMode={isInstapayMethod(selectedMethod) ? "text" : "numeric"}
                   onChange={(event) => {
-                    const value =
-                      selectedMethod.type ===
-                      "egyptian_wallet"
-                        ? event.target.value
-                            .replace(/\D/g, "")
-                            .slice(0, 11)
-                        : event.target.value;
-
+                    const value = isInstapayMethod(selectedMethod)
+                      ? event.target.value.slice(0, 80)
+                      : event.target.value.replace(/\D/g, "").slice(0, 11);
                     setSenderAccount(value);
                   }}
-                  placeholder={
-                    selectedMethod.type ===
-                    "egyptian_wallet"
-                      ? "01012345678"
-                      : "عنوان المحفظة"
-                  }
+                  placeholder={isInstapayMethod(selectedMethod) ? "name@instapay أو 01012345678" : "01012345678"}
                 />
               </div>
+
+              {isInstapayMethod(selectedMethod) && (
+                <small className={styles.fieldHint}>اكتبي الـIPA أو رقم الهاتف المرتبط بالحساب الذي تم التحويل منه.</small>
+              )}
             </label>}
 
             <label className={styles.field}>
