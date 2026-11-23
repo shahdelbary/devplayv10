@@ -19,6 +19,12 @@ const nextConfig: NextConfig = {
       { key: "X-Content-Type-Options", value: "nosniff" },
     ] }];
   },
+  async rewrites() {
+    return [
+      { source: "/community", destination: "/community-static/index.html" },
+      { source: "/community/", destination: "/community-static/index.html" },
+    ];
+  },
 };
 
 export default nextConfig;
